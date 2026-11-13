@@ -6,12 +6,17 @@ import {
   Eraser,
   ImagePlus,
   Loader2,
+  RefreshCw,
   RotateCw,
   Sparkles,
   Upload,
 } from "lucide-react";
 import { MistakeItem, Student, SUBJECTS, Subject } from "../types";
 import { SAMPLE_ENGLISH_PAPER_URL, SAMPLE_MATH_PAPER_URL } from "../data/presets";
+import {
+  buildAnswerExampleTemplate,
+  extractMistakeFromImage,
+} from "../utils/ocr";
 
 interface CaptureStudioProps {
   activeStudent: Student | null;
@@ -56,6 +61,8 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
 
   const [preferredSubject, setPreferredSubject] = useState<string>("自动识别");
   const [extracting, setExtracting] = useState<boolean>(false);
+  const [extractProgress, setExtractProgress] = useState<string>("");
+  const [extractNotice, setExtractNotice] = useState<string>("");
   const [extractError, setExtractError] = useState<string>("");
 
   // Form fields
@@ -295,51 +302,65 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
     e.target.value = "";
   };
 
-  const handleAIExtract = async () => {
+  const handleExtractFromCrop = async (forceLocalOcr = false) => {
     if (!croppedDataUrl) {
-      setExtractError("请在左侧试卷照片上框选需要识别的错题区域。");
+      setExtractError("请在试卷照片上框选需要识别的错题区域。");
       return;
     }
     setExtracting(true);
+    setExtractProgress("准备识别...");
     setExtractError("");
+    setExtractNotice("");
     try {
-      const resp = await fetch("/api/extract-mistake", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageBase64: croppedDataUrl,
-          mimeType: "image/jpeg",
-          preferredSubject,
-          studentGrade: activeStudent?.grade || "",
-        }),
+      const { mode, result } = await extractMistakeFromImage({
+        imageBase64: croppedDataUrl,
+        mimeType: "image/jpeg",
+        preferredSubject,
+        studentGrade: activeStudent?.grade || "",
+        forceLocalOcr,
+        onProgress: (label) => setExtractProgress(label),
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || "识别请求失败");
+
+      if (SUBJECTS.includes(result.subject)) {
+        setSubject(result.subject);
       }
-      const r = data.result;
-      if (r) {
-        if (SUBJECTS.includes(r.subject)) {
-          setSubject(r.subject);
-        }
-        setQuestionType(r.questionType || "解答题");
-        setKnowledgePoint(r.knowledgePoint || "");
-        setQuestionText(r.questionText || "");
-        setStudentWrongAnswer(r.studentWrongAnswer || "");
-        setErrorReason(r.errorReason || "");
-        setStandardAnswer(r.standardAnswer || "");
-        setCorrectionSteps(r.correctionSteps || "");
-        setHandwritingTemplate(r.handwritingTemplate || r.standardAnswer || "");
+      setQuestionType(result.questionType || "解答题");
+      if (result.knowledgePoint) setKnowledgePoint(result.knowledgePoint);
+      setQuestionText(result.questionText || "");
+      if (result.studentWrongAnswer) setStudentWrongAnswer(result.studentWrongAnswer);
+      if (result.errorReason) setErrorReason(result.errorReason);
+      if (result.standardAnswer) setStandardAnswer(result.standardAnswer);
+      if (result.correctionSteps) setCorrectionSteps(result.correctionSteps);
+      setHandwritingTemplate(result.handwritingTemplate || "");
+
+      if (mode === "ai") {
+        setExtractNotice("已完成智能识题并生成答题范例，如有错漏可直接在右侧订正修改。");
+      } else {
+        setExtractNotice(
+          "已通过纯前端离线 OCR 从截图识别题干文本（可在右侧订正错字、补全标准答案并同步生成答题范例）。"
+        );
       }
     } catch (err) {
       setExtractError(
         err instanceof Error
-          ? err.message
-          : "智能识题失败，您可以直接在右侧表单手工录入并保存。"
+          ? `识图失败：${err.message}。您可尝试开启「试卷增白锐化 / 去除红笔批改痕」后重新识别，或直接手工录入。`
+          : "识图失败，您可以直接在右侧表单手工录入并保存。"
       );
     } finally {
       setExtracting(false);
+      setExtractProgress("");
     }
+  };
+
+  const handleSyncAnswerTemplate = () => {
+    const generated = buildAnswerExampleTemplate({
+      subject,
+      questionType,
+      standardAnswer,
+      correctionSteps,
+      questionText,
+    });
+    setHandwritingTemplate(generated);
   };
 
   const handleSave = (e: React.FormEvent) => {
@@ -555,14 +576,14 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
           </div>
         )}
 
-        {/* Cropped preview + AI extract trigger */}
+        {/* Cropped preview + OCR extract trigger (Mobile-safe stacked layout) */}
         {croppedDataUrl && !cameraActive && (
           <div className="pt-3 border-t border-slate-200 space-y-3">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
               <span className="text-xs font-medium text-slate-700">
-                裁剪结果预览（将存入错题本并用于重排组卷）
+                裁剪结果预览（存入错题本并用于组卷）
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <select
                   value={preferredSubject}
                   onChange={(e) => setPreferredSubject(e.target.value)}
@@ -578,16 +599,20 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
                 </select>
                 <button
                   type="button"
-                  onClick={handleAIExtract}
+                  onClick={() => handleExtractFromCrop(false)}
                   disabled={extracting}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium bg-blue-700 text-white rounded-lg hover:bg-blue-800 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 text-xs font-medium bg-blue-700 text-white rounded-lg hover:bg-blue-800 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
                 >
                   {extracting ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   ) : (
                     <Sparkles className="w-3.5 h-3.5" />
                   )}
-                  {extracting ? "正在识题解析..." : "智能识题并生成描红范例"}
+                  {extracting
+                    ? extractProgress || "正在识别..."
+                    : questionText
+                    ? "根据截图重新识图"
+                    : "识图提取文本与范例"}
                 </button>
               </div>
             </div>
@@ -596,14 +621,20 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
                 src={croppedDataUrl}
                 alt="裁剪后的错题切片"
                 referrerPolicy="no-referrer"
-                className="max-h-40 object-contain rounded"
+                className="max-h-40 max-w-full object-contain rounded"
               />
             </div>
           </div>
         )}
 
+        {extractNotice && (
+          <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800 leading-relaxed">
+            {extractNotice}
+          </div>
+        )}
+
         {extractError && (
-          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 leading-relaxed">
             {extractError}
           </div>
         )}
@@ -685,14 +716,27 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-700 mb-1">
-            题干文本（用于组卷重排打印）
-          </label>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <label className="block text-xs font-medium text-slate-700">
+              题干文本（可核对订正识图错字，用于组卷打印）
+            </label>
+            {croppedDataUrl && (
+              <button
+                type="button"
+                disabled={extracting}
+                onClick={() => handleExtractFromCrop(false)}
+                className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:text-blue-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+              >
+                <RefreshCw className={`w-3 h-3 ${extracting ? "animate-spin" : ""}`} />
+                根据截图重新生成文本
+              </button>
+            )}
+          </div>
           <textarea
             rows={4}
             value={questionText}
             onChange={(e) => setQuestionText(e.target.value)}
-            placeholder="点击左侧“智能识题”自动提取，或直接在此输入/粘贴题目文本（纯静态离线亦可直接录题）"
+            placeholder="点击左侧“识图提取文本”自动识别，或直接在此输入/订正题目文本"
             className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 leading-relaxed"
           />
         </div>
@@ -718,7 +762,7 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
               type="text"
               value={errorReason}
               onChange={(e) => setErrorReason(e.target.value)}
-              placeholder="如：计算粗心 / 步骤跳跃"
+              placeholder="如：计算粗心 / 进一法判断错误"
               className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
             />
           </div>
@@ -733,7 +777,7 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
               rows={2}
               value={standardAnswer}
               onChange={(e) => setStandardAnswer(e.target.value)}
-              placeholder="输入最终标准答案"
+              placeholder="输入最终标准答案（如：A）"
               className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
             />
           </div>
@@ -745,40 +789,52 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
               rows={2}
               value={correctionSteps}
               onChange={(e) => setCorrectionSteps(e.target.value)}
-              placeholder="关键解题突破口与易错提醒"
+              placeholder="关键解题步骤与规范作答过程"
               className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
             />
           </div>
         </div>
 
         <div>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
             <label className="block text-xs font-medium text-slate-700">
-              卷面规范作答范例（自动生成浅色描红字帖）
+              描红答题范例（规范作答过程，生成浅色描红卷面）
             </label>
-            <button
-              type="button"
-              onClick={() =>
-                onGoToTracing({
-                  subject,
-                  title: knowledgePoint || `${subject}错题规范书写训练`,
-                  content:
-                    handwritingTemplate.trim() ||
-                    correctionSteps.trim() ||
-                    standardAnswer.trim() ||
-                    questionText.trim(),
-                })
-              }
-              className="text-xs font-medium text-blue-700 hover:text-blue-800 hover:underline whitespace-nowrap shrink-0"
-            >
-              立即预览浅色描红卷面 →
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleSyncAnswerTemplate}
+                className="text-xs font-medium text-slate-700 hover:text-blue-700 underline underline-offset-2 whitespace-nowrap shrink-0"
+              >
+                从标准答案与解析同步生成答题范例
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onGoToTracing({
+                    subject,
+                    title: knowledgePoint || `${subject}错题规范答题训练`,
+                    content:
+                      handwritingTemplate.trim() ||
+                      buildAnswerExampleTemplate({
+                        subject,
+                        questionType,
+                        standardAnswer,
+                        correctionSteps,
+                      }),
+                  })
+                }
+                className="text-xs font-medium text-blue-700 hover:text-blue-800 hover:underline whitespace-nowrap shrink-0"
+              >
+                预览浅色描红卷面 →
+              </button>
+            </div>
           </div>
           <textarea
             rows={4}
             value={handwritingTemplate}
             onChange={(e) => setHandwritingTemplate(e.target.value)}
-            placeholder="例如：解：(1) 由题意得... 规范分步排版后将直接生成浅色描红字帖"
+            placeholder="例如：答：本题选（A）。解析过程：2.5 ÷ 0.4 = 6.25，需用进一法至少需要 7 个瓶子。"
             className="w-full px-3 py-2 text-sm font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 leading-relaxed"
           />
         </div>

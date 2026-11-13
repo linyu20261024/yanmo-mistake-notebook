@@ -20,6 +20,7 @@ import {
   TraceColor,
   TracingConfig,
 } from "../types";
+import { buildAnswerExampleTemplate } from "../utils/ocr";
 
 interface TracingStudioProps {
   activeStudent: Student | null;
@@ -125,9 +126,16 @@ export const TracingStudio: React.FC<TracingStudioProps> = ({
     if (!m) return;
     setConfig((prev) => ({
       ...prev,
-      title: `${m.knowledgePoint} · 规范订正`,
+      title: `${m.knowledgePoint} · 规范答题范例`,
       subject: m.subject,
-      content: m.handwritingTemplate || m.correctionSteps || m.standardAnswer,
+      content:
+        m.handwritingTemplate ||
+        buildAnswerExampleTemplate({
+          subject: m.subject,
+          questionType: m.questionType,
+          standardAnswer: m.standardAnswer,
+          correctionSteps: m.correctionSteps,
+        }),
       gridType:
         m.subject === "英语"
           ? "english_4line"
@@ -232,8 +240,8 @@ export const TracingStudio: React.FC<TracingStudioProps> = ({
   const handleAIFormatStandard = async () => {
     setFormattingAI(true);
     setFormatError("");
+    const m = mistakes.find((item) => item.id === selectedMistakeId);
     try {
-      const m = mistakes.find((item) => item.id === selectedMistakeId);
       const resp = await fetch("/api/format-handwriting", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -243,17 +251,34 @@ export const TracingStudio: React.FC<TracingStudioProps> = ({
           rawCorrection: config.content,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || "规范排版请求失败");
+      const contentType = resp.headers.get("content-type") || "";
+      if (resp.ok && contentType.includes("application/json")) {
+        const data = await resp.json();
+        if (data.formattedText) {
+          setConfig((prev) => ({ ...prev, content: data.formattedText }));
+          return;
+        }
       }
-      if (data.formattedText) {
-        setConfig((prev) => ({ ...prev, content: data.formattedText }));
-      }
-    } catch (err) {
-      setFormatError(
-        err instanceof Error ? err.message : "排版整理失败，请手工微调换行。"
-      );
+      // Static hosting fallback: format locally into standard answer sheet layout
+      setConfig((prev) => ({
+        ...prev,
+        content: buildAnswerExampleTemplate({
+          subject: config.subject,
+          questionType: m?.questionType || "解答题",
+          standardAnswer: m?.standardAnswer || "",
+          correctionSteps: prev.content,
+        }),
+      }));
+    } catch {
+      setConfig((prev) => ({
+        ...prev,
+        content: buildAnswerExampleTemplate({
+          subject: config.subject,
+          questionType: m?.questionType || "解答题",
+          standardAnswer: m?.standardAnswer || "",
+          correctionSteps: prev.content,
+        }),
+      }));
     } finally {
       setFormattingAI(false);
     }

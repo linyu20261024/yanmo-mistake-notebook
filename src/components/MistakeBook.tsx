@@ -3,12 +3,18 @@ import {
   BookOpen,
   Check,
   FilePlus2,
+  Loader2,
   PenTool,
+  RefreshCw,
   Search,
   Trash2,
   X,
 } from "lucide-react";
 import { MasteryStatus, MistakeItem, Student, SUBJECTS, Subject } from "../types";
+import {
+  buildAnswerExampleTemplate,
+  extractMistakeFromImage,
+} from "../utils/ocr";
 
 interface MistakeBookProps {
   activeStudent: Student;
@@ -56,6 +62,8 @@ export const MistakeBook: React.FC<MistakeBookProps> = ({
   const [statusFilter, setStatusFilter] = useState<MasteryStatus | "all">("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [editingMistake, setEditingMistake] = useState<MistakeItem | null>(null);
+  const [reOcrLoading, setReOcrLoading] = useState<boolean>(false);
+  const [reOcrStatus, setReOcrStatus] = useState<string>("");
 
   // Subject counts for this student
   const subjectCounts = useMemo(() => {
@@ -331,20 +339,90 @@ export const MistakeBook: React.FC<MistakeBookProps> = ({
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>
                 <h3 className="text-base font-semibold text-slate-900">
-                  错题订正修改与规范书写模板编辑
+                  错题订正修改与答题范例编辑
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  修改后的规范作答模板将同步用于生成浅色描红字帖
+                  可对照原题截图重新识别或订正文本，描红范例将生成规范答题卷面
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setEditingMistake(null)}
+                onClick={() => {
+                  setEditingMistake(null);
+                  setReOcrStatus("");
+                }}
                 className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {editingMistake.croppedImageUrl && (
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-slate-700">原题截图对照</span>
+                  <button
+                    type="button"
+                    disabled={reOcrLoading}
+                    onClick={async () => {
+                      if (!editingMistake.croppedImageUrl) return;
+                      setReOcrLoading(true);
+                      setReOcrStatus("正在根据截图重新生成文本...");
+                      try {
+                        const { mode, result } = await extractMistakeFromImage({
+                          imageBase64: editingMistake.croppedImageUrl,
+                          preferredSubject: editingMistake.subject,
+                          studentGrade: activeStudent.grade,
+                          onProgress: (label) => setReOcrStatus(label),
+                        });
+                        setEditingMistake((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                questionText: result.questionText || prev.questionText,
+                                questionType: result.questionType || prev.questionType,
+                                knowledgePoint: result.knowledgePoint || prev.knowledgePoint,
+                                standardAnswer: result.standardAnswer || prev.standardAnswer,
+                                correctionSteps: result.correctionSteps || prev.correctionSteps,
+                                handwritingTemplate:
+                                  result.handwritingTemplate || prev.handwritingTemplate,
+                              }
+                            : null
+                        );
+                        setReOcrStatus(
+                          mode === "ai"
+                            ? "已重新智能识别并更新文本，请核对后保存。"
+                            : "已通过离线 OCR 从截图重新生成题干文本，可继续订正错字或补全答案。"
+                        );
+                      } catch (err) {
+                        setReOcrStatus(
+                          err instanceof Error ? `识别失败：${err.message}` : "识别失败，请手工订正。"
+                        );
+                      } finally {
+                        setReOcrLoading(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-blue-700 text-white rounded-lg hover:bg-blue-800 disabled:opacity-60"
+                  >
+                    {reOcrLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    {reOcrLoading ? "识别中..." : "根据截图重新生成文本"}
+                  </button>
+                </div>
+                <img
+                  src={editingMistake.croppedImageUrl}
+                  alt="原题截图"
+                  referrerPolicy="no-referrer"
+                  className="max-h-36 w-full object-contain rounded bg-white border border-slate-200 p-1"
+                />
+                {reOcrStatus && (
+                  <div className="text-xs text-blue-700">{reOcrStatus}</div>
+                )}
+              </div>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
@@ -467,9 +545,28 @@ export const MistakeBook: React.FC<MistakeBookProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                卷面规范书写范例（用于浅色描红临摹）
-              </label>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                <label className="block text-xs font-medium text-slate-700">
+                  描红答题范例（规范答题过程，用于浅色卷面描红）
+                </label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setEditingMistake({
+                      ...editingMistake,
+                      handwritingTemplate: buildAnswerExampleTemplate({
+                        subject: editingMistake.subject,
+                        questionType: editingMistake.questionType,
+                        standardAnswer: editingMistake.standardAnswer,
+                        correctionSteps: editingMistake.correctionSteps,
+                      }),
+                    })
+                  }
+                  className="text-xs font-medium text-blue-700 hover:text-blue-800 underline underline-offset-2"
+                >
+                  从标准答案与解析同步生成答题范例
+                </button>
+              </div>
               <textarea
                 rows={4}
                 value={editingMistake.handwritingTemplate}
@@ -479,6 +576,7 @@ export const MistakeBook: React.FC<MistakeBookProps> = ({
                     handwritingTemplate: e.target.value,
                   })
                 }
+                placeholder="输入规范的解题步骤或标准作答段落作为描红范例"
                 className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg leading-relaxed"
               />
             </div>

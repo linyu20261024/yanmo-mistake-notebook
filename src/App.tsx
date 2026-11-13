@@ -13,6 +13,7 @@ import {
   loadAppState,
   saveAppState,
 } from "./utils/storage";
+import { buildAnswerExampleTemplate } from "./utils/ocr";
 import { MistakeBook } from "./components/MistakeBook";
 import { CaptureStudio } from "./components/CaptureStudio";
 import { ExamBuilder } from "./components/ExamBuilder";
@@ -519,11 +520,15 @@ export default function App() {
                 setTracingDraft({
                   mistakeId: item.id,
                   subject: item.subject,
-                  title: `${item.knowledgePoint} · 规范书写`,
+                  title: `${item.knowledgePoint} · 规范答题范例`,
                   content:
                     item.handwritingTemplate ||
-                    item.correctionSteps ||
-                    item.standardAnswer,
+                    buildAnswerExampleTemplate({
+                      subject: item.subject,
+                      questionType: item.questionType,
+                      standardAnswer: item.standardAnswer,
+                      correctionSteps: item.correctionSteps,
+                    }),
                 });
                 setActiveTab("tracing");
               }}
