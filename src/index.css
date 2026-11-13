@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+}
+
+.font-serif-sc {
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+}
+
+.font-kaiti {
+  font-family: "KaiTi", "STKaiti", "BiauKai", "ZCOOL XiaoWei", "Noto Serif SC", serif;
+}
+
+.font-english-neat {
+  font-family: "Plus Jakarta Sans", "Segoe Print", "Comic Sans MS", sans-serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tracing Grid Backgrounds */
+.grid-lined-paper {
+  background-image: linear-gradient(to bottom, transparent calc(100% - 1px), #cbd5e1 calc(100% - 1px));
+}
+
+.grid-dashed-answer {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(var(--row-h, 44px) - 1px),
+    #cbd5e1 calc(var(--row-h, 44px) - 1px),
+    #cbd5e1 var(--row-h, 44px)
+  );
+}
+
+/* Print Styles for A4 Reassembled Exam & Tracing Sheets */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 14mm 15mm;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-container {
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .print-page-break {
+    page-break-before: always;
+    break-before: page;
+  }
+
+  .print-avoid-break {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+}
