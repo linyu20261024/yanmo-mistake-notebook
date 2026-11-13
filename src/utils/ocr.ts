@@ -18,95 +18,76 @@ export interface ExtractResponse {
   result: ExtractedMistakeResult;
 }
 
-const OCR_CACHE_NAME = "yanmo-ocr-tessdata-v1";
+const OCR_CACHE_NAME = "yanmo-ocr-assets-v2";
+const TESSERACT_JS_VERSION = "7.0.0";
+const TESSERACT_CORE_VERSION = "7.0.0";
 
 function getBaseHref(): string {
   const base = import.meta.env.BASE_URL || "/";
   return new URL(base, window.location.origin).href.replace(/\/?$/, "/");
 }
 
-async function resolveWorkerAndCorePaths(): Promise<{
-  workerPath: string;
-  corePath: string;
-  isSameOrigin: boolean;
-}> {
-  const baseHref = getBaseHref();
-  const localWorker = `${baseHref}tesseract/worker.min.js`;
+function isGitHubPagesHost(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.location.hostname.endsWith(".github.io")
+  );
+}
+
+async function detectOptimalCoreFilename(): Promise<string> {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3500);
-    const resp = await fetch(localWorker, {
-      method: "HEAD",
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    const ct = resp.headers.get("content-type") || "";
-    if (resp.ok && !ct.includes("text/html")) {
-      return {
-        workerPath: localWorker,
-        corePath: `${baseHref}tesseract`,
-        isSameOrigin: true,
-      };
+    // Exact byte probes matching wasm-feature-detect for relaxedSimd & simd
+    const relaxedSimdSupported =
+      typeof WebAssembly !== "undefined" &&
+      WebAssembly.validate(
+        new Uint8Array([
+          0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15,
+          1, 13, 0, 65, 1, 253, 15, 65, 2, 253, 15, 253, 128, 2, 11,
+        ])
+      );
+    if (relaxedSimdSupported) {
+      return "tesseract-core-relaxedsimd-lstm.wasm.js";
+    }
+
+    const simdSupported =
+      typeof WebAssembly !== "undefined" &&
+      WebAssembly.validate(
+        new Uint8Array([
+          0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10,
+          1, 8, 0, 65, 0, 253, 15, 253, 98, 11,
+        ])
+      );
+    if (simdSupported) {
+      return "tesseract-core-simd-lstm.wasm.js";
     }
   } catch {
-    // Fallback to China npmmirror CDN
+    // Fallback to baseline LSTM core
   }
-  return {
-    workerPath:
-      "https://cdn.npmmirror.com/packages/tesseract.js/7.0.0/files/dist/worker.min.js",
-    corePath:
-      "https://cdn.npmmirror.com/packages/tesseract.js-core/7.0.0/files",
-    isSameOrigin: false,
-  };
+  return "tesseract-core-lstm.wasm.js";
 }
 
 function isValidGzipHeader(buf: Uint8Array): boolean {
   return buf.length > 64 && buf[0] === 0x1f && buf[1] === 0x8b;
 }
 
-async function writeTesseractIdbCache(key: string, value: Uint8Array): Promise<boolean> {
-  if (typeof indexedDB === "undefined") return false;
-  return new Promise((resolve) => {
-    try {
-      const req = indexedDB.open("keyval-store");
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains("keyval")) {
-          req.result.createObjectStore("keyval");
-        }
-      };
-      req.onsuccess = () => {
-        try {
-          const db = req.result;
-          if (!db.objectStoreNames.contains("keyval")) {
-            db.close();
-            resolve(false);
-            return;
-          }
-          const tx = db.transaction("keyval", "readwrite");
-          tx.objectStore("keyval").put(value, key);
-          tx.oncomplete = () => {
-            db.close();
-            resolve(true);
-          };
-          tx.onerror = () => {
-            db.close();
-            resolve(false);
-          };
-        } catch {
-          resolve(false);
-        }
-      };
-      req.onerror = () => resolve(false);
-    } catch {
-      resolve(false);
-    }
-  });
+function isValidJsAsset(buf: Uint8Array, minBytes: number): boolean {
+  if (buf.length < minBytes) return false;
+  // Reject HTML 404/fallback pages
+  const head = new TextDecoder("utf-8", { fatal: false })
+    .decode(buf.subarray(0, 64))
+    .trimStart()
+    .toLowerCase();
+  if (head.startsWith("<html") || head.startsWith("<!doctype") || head.startsWith("<")) {
+    return false;
+  }
+  return true;
 }
 
 async function fetchWithProgressAndTimeout(
   url: string,
   label: string,
   timeoutMs: number,
+  validator: (buf: Uint8Array) => boolean,
   onProgress?: (msg: string) => void
 ): Promise<Uint8Array | null> {
   const controller = new AbortController();
@@ -116,17 +97,21 @@ async function fetchWithProgressAndTimeout(
     const resp = await fetch(url, { signal: controller.signal });
     if (!resp.ok) return null;
 
+    const ct = (resp.headers.get("content-type") || "").toLowerCase();
+    if (ct.includes("text/html")) return null;
+
     const totalBytes = Number(resp.headers.get("content-length") || 0);
     const reader = resp.body?.getReader();
 
     if (!reader) {
       const ab = await resp.arrayBuffer();
       const bytes = new Uint8Array(ab);
-      return isValidGzipHeader(bytes) ? bytes : null;
+      return validator(bytes) ? bytes : null;
     }
 
     const chunks: Uint8Array[] = [];
     let loaded = 0;
+    let lastReportAt = 0;
 
     while (true) {
       clearTimeout(timer);
@@ -137,14 +122,18 @@ async function fetchWithProgressAndTimeout(
       if (value) {
         chunks.push(value);
         loaded += value.byteLength;
-        if (totalBytes > 0) {
-          const pct = Math.min(99, Math.round((loaded / totalBytes) * 100));
-          const mbLoaded = (loaded / 1048576).toFixed(1);
-          const mbTotal = (totalBytes / 1048576).toFixed(1);
-          onProgress?.(`${label} ${pct}% (${mbLoaded}/${mbTotal} MB)`);
-        } else {
-          const mbLoaded = (loaded / 1048576).toFixed(1);
-          onProgress?.(`${label} (${mbLoaded} MB)...`);
+        const now = Date.now();
+        if (now - lastReportAt > 120 || loaded === totalBytes) {
+          lastReportAt = now;
+          if (totalBytes > 0) {
+            const pct = Math.min(99, Math.round((loaded / totalBytes) * 100));
+            const mbLoaded = (loaded / 1048576).toFixed(1);
+            const mbTotal = (totalBytes / 1048576).toFixed(1);
+            onProgress?.(`${label} ${pct}% (${mbLoaded}/${mbTotal} MB)`);
+          } else {
+            const mbLoaded = (loaded / 1048576).toFixed(1);
+            onProgress?.(`${label} (${mbLoaded} MB)...`);
+          }
         }
       }
     }
@@ -156,7 +145,7 @@ async function fetchWithProgressAndTimeout(
       offset += c.byteLength;
     }
 
-    return isValidGzipHeader(merged) ? merged : null;
+    return validator(merged) ? merged : null;
   } catch {
     return null;
   } finally {
@@ -164,54 +153,50 @@ async function fetchWithProgressAndTimeout(
   }
 }
 
-async function loadLangBinary(
-  lang: "chi_sim" | "eng",
-  displayLabel: string,
-  onProgress?: (msg: string) => void
-): Promise<Uint8Array> {
-  const cacheKey = `https://yanmo.local/tessdata/4.0.0_best_int/${lang}.traineddata.gz`;
+async function loadAssetWithCacheAndMirrors(params: {
+  cacheKey: string;
+  mimeType: string;
+  displayLabel: string;
+  urls: string[];
+  validator: (buf: Uint8Array) => boolean;
+  onProgress?: (msg: string) => void;
+}): Promise<Uint8Array> {
+  const { cacheKey, mimeType, displayLabel, urls, validator, onProgress } = params;
 
-  // 1. Check CacheStorage first
+  // 1. Try CacheStorage first
   if (typeof caches !== "undefined") {
     try {
       const cache = await caches.open(OCR_CACHE_NAME);
       const cached = await cache.match(cacheKey);
       if (cached) {
         const bytes = new Uint8Array(await cached.arrayBuffer());
-        if (isValidGzipHeader(bytes)) {
+        if (validator(bytes)) {
           onProgress?.(`已从本地缓存读取${displayLabel}`);
           return bytes;
         }
       }
     } catch {
-      // Ignore CacheStorage restriction
+      // Ignore CacheStorage restriction (e.g. private browsing)
     }
   }
 
-  // 2. Try same-origin hosted tessdata first, then China-friendly mirrors
-  const baseHref = getBaseHref();
-  const candidates = [
-    `${baseHref}tessdata/${lang}.traineddata.gz`,
-    `https://cdn.npmmirror.com/packages/%40tesseract.js-data/${lang}/1.0.0/files/4.0.0_best_int/${lang}.traineddata.gz`,
-    `https://fastly.jsdelivr.net/npm/@tesseract.js-data/${lang}/4.0.0_best_int/${lang}.traineddata.gz`,
-    `https://unpkg.com/@tesseract.js-data/${lang}/4.0.0_best_int/${lang}.traineddata.gz`,
-    `https://cdn.jsdelivr.net/npm/@tesseract.js-data/${lang}/4.0.0_best_int/${lang}.traineddata.gz`,
-  ];
+  // 2. Try ordered URLs with per-chunk stall timeout
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const isSameOrigin = url.startsWith(window.location.origin);
+    const timeoutMs = isSameOrigin && !isGitHubPagesHost() ? 5000 : 8000;
 
-  for (let i = 0; i < candidates.length; i++) {
-    const url = candidates[i];
-    const isLocal = i === 0;
-    const timeoutMs = isLocal ? 6000 : 12000;
-    if (i > 0) {
-      onProgress?.(`正在连接镜像源下载${displayLabel} (${i}/${candidates.length - 1})...`);
-    } else {
+    if (i === 0) {
       onProgress?.(`正在加载${displayLabel}...`);
+    } else {
+      onProgress?.(`切换备用源加载${displayLabel} (${i}/${urls.length - 1})...`);
     }
 
     const bytes = await fetchWithProgressAndTimeout(
       url,
       `下载${displayLabel}`,
       timeoutMs,
+      validator,
       onProgress
     );
 
@@ -223,7 +208,7 @@ async function loadLangBinary(
           await cache.put(
             cacheKey,
             new Response(copy, {
-              headers: { "Content-Type": "application/gzip" },
+              headers: { "Content-Type": mimeType },
             })
           );
         } catch {
@@ -235,8 +220,83 @@ async function loadLangBinary(
   }
 
   throw new Error(
-    `无法下载${displayLabel}（当前网络访问外部语言包受限）。您可直接手工输入题干保存，或检查网络后重试。`
+    `无法下载${displayLabel}（当前网络访问外部识图资源受限）。您可直接手工输入题干保存，或检查网络后重试。`
   );
+}
+
+function orderUrlsForEnvironment(sameOriginUrl: string, mirrorUrls: string[]): string[] {
+  // On GitHub Pages in China, Alibaba npmmirror CDN is significantly faster than github.io for multi-MB assets
+  if (isGitHubPagesHost()) {
+    return [mirrorUrls[0], sameOriginUrl, ...mirrorUrls.slice(1)];
+  }
+  return [sameOriginUrl, ...mirrorUrls];
+}
+
+async function loadLangBinary(
+  lang: "chi_sim" | "eng",
+  displayLabel: string,
+  onProgress?: (msg: string) => void
+): Promise<Uint8Array> {
+  const baseHref = getBaseHref();
+  const sameOriginUrl = `${baseHref}tessdata/${lang}.traineddata.gz`;
+  const mirrorUrls = [
+    `https://cdn.npmmirror.com/packages/%40tesseract.js-data/${lang}/1.0.0/files/4.0.0_best_int/${lang}.traineddata.gz`,
+    `https://fastly.jsdelivr.net/npm/@tesseract.js-data/${lang}/4.0.0_best_int/${lang}.traineddata.gz`,
+    `https://unpkg.com/@tesseract.js-data/${lang}/4.0.0_best_int/${lang}.traineddata.gz`,
+    `https://cdn.jsdelivr.net/npm/@tesseract.js-data/${lang}/4.0.0_best_int/${lang}.traineddata.gz`,
+  ];
+
+  return loadAssetWithCacheAndMirrors({
+    cacheKey: `https://yanmo.local/tessdata/4.0.0_best_int/${lang}.traineddata.gz`,
+    mimeType: "application/gzip",
+    displayLabel,
+    urls: orderUrlsForEnvironment(sameOriginUrl, mirrorUrls),
+    validator: isValidGzipHeader,
+    onProgress,
+  });
+}
+
+async function loadWorkerBinary(onProgress?: (msg: string) => void): Promise<Uint8Array> {
+  const baseHref = getBaseHref();
+  const sameOriginUrl = `${baseHref}tesseract/worker.min.js`;
+  const mirrorUrls = [
+    `https://cdn.npmmirror.com/packages/tesseract.js/${TESSERACT_JS_VERSION}/files/dist/worker.min.js`,
+    `https://fastly.jsdelivr.net/npm/tesseract.js@${TESSERACT_JS_VERSION}/dist/worker.min.js`,
+    `https://unpkg.com/tesseract.js@${TESSERACT_JS_VERSION}/dist/worker.min.js`,
+    `https://cdn.jsdelivr.net/npm/tesseract.js@${TESSERACT_JS_VERSION}/dist/worker.min.js`,
+  ];
+
+  return loadAssetWithCacheAndMirrors({
+    cacheKey: `https://yanmo.local/tesseract/${TESSERACT_JS_VERSION}/worker.min.js`,
+    mimeType: "application/javascript",
+    displayLabel: "识图调度脚本",
+    urls: orderUrlsForEnvironment(sameOriginUrl, mirrorUrls),
+    validator: (buf) => isValidJsAsset(buf, 20000),
+    onProgress,
+  });
+}
+
+async function loadCoreBinary(
+  coreFilename: string,
+  onProgress?: (msg: string) => void
+): Promise<Uint8Array> {
+  const baseHref = getBaseHref();
+  const sameOriginUrl = `${baseHref}tesseract/${coreFilename}`;
+  const mirrorUrls = [
+    `https://cdn.npmmirror.com/packages/tesseract.js-core/${TESSERACT_CORE_VERSION}/files/${coreFilename}`,
+    `https://fastly.jsdelivr.net/npm/tesseract.js-core@${TESSERACT_CORE_VERSION}/${coreFilename}`,
+    `https://unpkg.com/tesseract.js-core@${TESSERACT_CORE_VERSION}/${coreFilename}`,
+    `https://cdn.jsdelivr.net/npm/tesseract.js-core@${TESSERACT_CORE_VERSION}/${coreFilename}`,
+  ];
+
+  return loadAssetWithCacheAndMirrors({
+    cacheKey: `https://yanmo.local/tesseract-core/${TESSERACT_CORE_VERSION}/${coreFilename}`,
+    mimeType: "application/javascript",
+    displayLabel: "识图引擎核心",
+    urls: orderUrlsForEnvironment(sameOriginUrl, mirrorUrls),
+    validator: (buf) => isValidJsAsset(buf, 500000),
+    onProgress,
+  });
 }
 
 async function preprocessForOcr(imageBase64: string): Promise<string> {
@@ -366,71 +426,145 @@ async function runBrowserOcr(
   imageBase64: string,
   onProgress?: (label: string) => void
 ): Promise<string> {
-  onProgress?.("正在准备识图核心引擎...");
-  const { workerPath, corePath, isSameOrigin } = await resolveWorkerAndCorePaths();
   const baseHref = getBaseHref();
+  const coreFilename = await detectOptimalCoreFilename();
 
+  // Pre-fetch & CacheStorage-persist ALL 4 assets on main thread with live MB/% progress
+  const workerBytes = await loadWorkerBinary(onProgress);
+  const coreBytes = await loadCoreBinary(coreFilename, onProgress);
   const chiBytes = await loadLangBinary("chi_sim", "中文识图模型", onProgress);
   const engBytes = await loadLangBinary("eng", "英文数字模型", onProgress);
 
-  // Store downloaded gzipped traineddata into tesseract's IndexedDB cache ("keyval-store")
-  // so we can pass string "chi_sim+eng" to createWorker and bypass tesseract.js v7's {code, data} init bug
-  const chiCached = await writeTesseractIdbCache("./chi_sim.traineddata", chiBytes);
-  const engCached = await writeTesseractIdbCache("./eng.traineddata", engBytes);
-
+  let currentStage = "创建内存识图通道";
   onProgress?.("正在启动本地识图引擎...");
 
-  let rejectWorkerError: ((err: Error) => void) | null = null;
-  const workerErrorPromise = new Promise<never>((_, reject) => {
-    rejectWorkerError = reject;
-  });
+  const coreBlobUrl = URL.createObjectURL(
+    new Blob([coreBytes.slice().buffer], { type: "application/javascript" })
+  );
+  const chiBlobUrl = URL.createObjectURL(
+    new Blob([chiBytes.slice().buffer], { type: "application/gzip" })
+  );
+  const engBlobUrl = URL.createObjectURL(
+    new Blob([engBytes.slice().buffer], { type: "application/gzip" })
+  );
 
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => {
-      reject(new Error("本地识图引擎启动超时，请刷新页面后重试或直接手工输入题干。"));
-    }, 25000);
-  });
+  // Intercept importScripts and fetch inside the worker so all 4 assets load from RAM Blob URLs
+  // with zero worker-side network stalls and zero IndexedDB lock dependencies
+  const workerShim = `
+const __origImportScripts = self.importScripts.bind(self);
+self.importScripts = function(...urls) {
+  const mapped = urls.map((u) => String(u).includes("tesseract-core") ? ${JSON.stringify(coreBlobUrl)} : u);
+  return __origImportScripts.apply(self, mapped);
+};
+const __origFetch = self.fetch.bind(self);
+self.fetch = function(input, init) {
+  const u = typeof input === "string" ? input : (input && typeof input === "object" && "url" in input ? input.url : String(input));
+  if (u.includes("chi_sim.traineddata")) {
+    return __origFetch(${JSON.stringify(chiBlobUrl)}, init).catch(() => __origFetch(input, init));
+  }
+  if (u.includes("eng.traineddata")) {
+    return __origFetch(${JSON.stringify(engBlobUrl)}, init).catch(() => __origFetch(input, init));
+  }
+  return __origFetch(input, init);
+};
+;\n`;
 
-  const createPromise = createWorker("chi_sim+eng", 1, {
-    workerPath,
-    corePath,
-    workerBlobURL: !isSameOrigin,
-    langPath: `${baseHref}tessdata`,
-    cacheMethod: chiCached && engCached ? "readOnly" : "write",
-    errorHandler: (err) => {
-      rejectWorkerError?.(new Error(typeof err === "string" ? err : "识图引擎加载失败"));
-    },
-    logger: (m) => {
-      if (m.status === "loading tesseract core") {
-        onProgress?.("正在加载识图 WASM 核心...");
-      } else if (m.status === "loading language traineddata") {
-        const pct = Math.round((m.progress || 0) * 100);
-        onProgress?.(`正在解压语言模型 ${pct}%...`);
-      } else if (m.status === "initializing api" || m.status === "initializing tesseract") {
-        onProgress?.("正在初始化文字识别引擎...");
-      } else if (m.status === "recognizing text") {
-        const pct = Math.round((m.progress || 0) * 100);
-        onProgress?.(`正在识别题目文字 ${pct}%...`);
-      }
-    },
-  });
+  const workerBlobUrl = URL.createObjectURL(
+    new Blob([workerShim, workerBytes.slice().buffer], {
+      type: "application/javascript",
+    })
+  );
 
-  const worker = await Promise.race([createPromise, workerErrorPromise, timeoutPromise]);
+  let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
+  let startupTimer: ReturnType<typeof setTimeout> | null = null;
+  let recogTimer: ReturnType<typeof setTimeout> | null = null;
 
   try {
+    let rejectWorkerError: ((err: Error) => void) | null = null;
+    const workerErrorPromise = new Promise<never>((_, reject) => {
+      rejectWorkerError = reject;
+    });
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      startupTimer = setTimeout(() => {
+        reject(
+          new Error(
+            `本地识图引擎在「${currentStage}」阶段超时，请刷新页面后重试或直接手工输入题干。`
+          )
+        );
+      }, 35000);
+    });
+
+    const createPromise = createWorker("chi_sim+eng", 1, {
+      workerPath: workerBlobUrl,
+      workerBlobURL: false,
+      corePath: `${baseHref}tesseract/${coreFilename}`,
+      langPath: `${baseHref}tessdata`,
+      cacheMethod: "none",
+      errorHandler: (err) => {
+        rejectWorkerError?.(
+          new Error(typeof err === "string" ? err : "识图引擎内部初始化失败")
+        );
+      },
+      logger: (m) => {
+        if (m.status === "loading tesseract core") {
+          currentStage = "加载 WASM 核心";
+          onProgress?.("正在加载识图 WASM 核心...");
+        } else if (m.status === "initializing tesseract") {
+          currentStage = "编译 WASM 核心";
+          onProgress?.("正在初始化识图内核...");
+        } else if (m.status === "loading language traineddata") {
+          const pct = Math.round((m.progress || 0) * 100);
+          currentStage = `解压语言模型 ${pct}%`;
+          onProgress?.(`正在解压语言模型 ${pct}%...`);
+        } else if (m.status === "initializing api") {
+          currentStage = "初始化识别引擎";
+          onProgress?.("正在初始化文字识别引擎...");
+        } else if (m.status === "recognizing text") {
+          const pct = Math.round((m.progress || 0) * 100);
+          currentStage = `识别文字 ${pct}%`;
+          onProgress?.(`正在识别题目文字 ${pct}%...`);
+        }
+      },
+    });
+
+    worker = await Promise.race([createPromise, workerErrorPromise, timeoutPromise]);
+    if (startupTimer) {
+      clearTimeout(startupTimer);
+      startupTimer = null;
+    }
+
     onProgress?.("正在优化图片并识别文字...");
     const processedImg = await preprocessForOcr(imageBase64);
+
     const {
       data: { text },
     } = await Promise.race([
       worker.recognize(processedImg),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("文字识别超时，请适当缩小框选范围后重试。")), 25000)
-      ),
+      new Promise<never>((_, reject) => {
+        recogTimer = setTimeout(
+          () => reject(new Error("文字识别超时，请适当缩小框选范围后重试。")),
+          30000
+        );
+      }),
     ]);
+
+    if (recogTimer) {
+      clearTimeout(recogTimer);
+      recogTimer = null;
+    }
+
     return cleanOcrText(text || "");
   } finally {
-    await worker.terminate().catch(() => {});
+    if (startupTimer) clearTimeout(startupTimer);
+    if (recogTimer) clearTimeout(recogTimer);
+    if (worker) {
+      await worker.terminate().catch(() => {});
+    }
+    URL.revokeObjectURL(workerBlobUrl);
+    URL.revokeObjectURL(coreBlobUrl);
+    URL.revokeObjectURL(chiBlobUrl);
+    URL.revokeObjectURL(engBlobUrl);
   }
 }
 
