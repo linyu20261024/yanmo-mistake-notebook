@@ -164,6 +164,58 @@ app.post("/api/format-handwriting", async (req, res) => {
   }
 });
 
+app.post("/api/proofread-ocr", async (req, res) => {
+  try {
+    const { rawText, subject } = req.body as {
+      rawText?: string;
+      subject?: string;
+    };
+    if (!rawText || !rawText.trim()) {
+      res.status(400).json({ error: "请先提供需要逻辑修正的文本。" });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({ error: "未配置 GEMINI_API_KEY" });
+      return;
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-4-hydrogen",
+      contents: `你是一名中小学全科试卷校对教师。下面这段文字是从试卷照片离线 OCR 识别出来的，存在形近错别字（如“频子→瓶子”、“彩迟→彩带”、“华果→苹果”）、数学符号误识别（如“二→÷”、“<→≈”、“k8→kg”、“0:4→0.4”、“7→？”）、选项序号错位（如“8，”应为“B.”）或红笔涂抹导致的乱码。
+请结合【${subject || "中小学学科"}】语义、上下文数值一致性与题型结构逻辑，将它修正为通顺、规范的试卷原题文本（保留换行与 A/B/C/D 选项排版；对完全缺失且无法确定原词的地方用“[待核对]”标注，切勿凭空编造无关题目）。
+
+待校对文本：
+${rawText}`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            correctedText: { type: Type.STRING },
+            notes: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: ["correctedText", "notes"],
+        },
+      },
+    });
+
+    const parsed = JSON.parse((response.text ?? "{}").trim());
+    res.json({
+      correctedText: parsed.correctedText || rawText,
+      notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+    });
+  } catch (error) {
+    console.error("Proofread OCR error:", error);
+    const message = error instanceof Error ? error.message : "文本逻辑纠偏失败";
+    res.status(500).json({ error: message });
+  }
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");

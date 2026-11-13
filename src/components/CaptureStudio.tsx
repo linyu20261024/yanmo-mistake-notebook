@@ -10,12 +10,14 @@ import {
   RotateCw,
   Sparkles,
   Upload,
+  Wand2,
 } from "lucide-react";
 import { MistakeItem, Student, SUBJECTS, Subject } from "../types";
 import { SAMPLE_ENGLISH_PAPER_URL, SAMPLE_MATH_PAPER_URL } from "../data/presets";
 import {
   buildAnswerExampleTemplate,
   extractMistakeFromImage,
+  proofreadOcrText,
 } from "../utils/ocr";
 
 interface CaptureStudioProps {
@@ -61,9 +63,13 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
 
   const [preferredSubject, setPreferredSubject] = useState<string>("自动识别");
   const [extracting, setExtracting] = useState<boolean>(false);
+  const [proofreading, setProofreading] = useState<boolean>(false);
   const [extractProgress, setExtractProgress] = useState<string>("");
   const [extractNotice, setExtractNotice] = useState<string>("");
   const [extractError, setExtractError] = useState<string>("");
+  const [rawOcrText, setRawOcrText] = useState<string>("");
+  const [correctionNotes, setCorrectionNotes] = useState<string[]>([]);
+  const [uncertainSpots, setUncertainSpots] = useState<string[]>([]);
 
   // Form fields
   const [subject, setSubject] = useState<Subject>("数学");
@@ -327,6 +333,9 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
       setQuestionType(result.questionType || "解答题");
       if (result.knowledgePoint) setKnowledgePoint(result.knowledgePoint);
       setQuestionText(result.questionText || "");
+      setRawOcrText(result.rawQuestionText || "");
+      setCorrectionNotes(result.correctionNotes || []);
+      setUncertainSpots(result.uncertainSpots || []);
       if (result.studentWrongAnswer) setStudentWrongAnswer(result.studentWrongAnswer);
       if (result.errorReason) setErrorReason(result.errorReason);
       if (result.standardAnswer) setStandardAnswer(result.standardAnswer);
@@ -337,7 +346,7 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
         setExtractNotice("已完成智能识题并生成答题范例，如有错漏可直接在右侧订正修改。");
       } else {
         setExtractNotice(
-          "已通过纯前端离线 OCR 从截图识别题干文本（可在右侧订正错字、补全标准答案并同步生成答题范例）。"
+          "已完成离线识图与逻辑纠偏（可在右侧直接修改待核对部分、补全标准答案并同步生成答题范例）。"
         );
       }
     } catch (err) {
@@ -349,6 +358,31 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
     } finally {
       setExtracting(false);
       setExtractProgress("");
+    }
+  };
+
+  const handleLogicalProofread = async () => {
+    if (!questionText.trim()) return;
+    setProofreading(true);
+    setExtractError("");
+    try {
+      const source = rawOcrText && rawOcrText === questionText ? rawOcrText : questionText;
+      if (!rawOcrText) {
+        setRawOcrText(questionText);
+      }
+      const res = await proofreadOcrText(source, subject);
+      setQuestionText(res.correctedText);
+      setCorrectionNotes(res.appliedFixes);
+      setUncertainSpots(res.uncertainSpots);
+      setExtractNotice(
+        res.mode === "ai"
+          ? "已完成语义逻辑校对并更新题干，请核对后保存。"
+          : res.appliedFixes.length > 0
+          ? `已按题干逻辑自动修正 ${res.appliedFixes.length} 类问题，请核对后继续编辑。`
+          : "未发现可自动替换的逻辑错误，您可以直接手工微调。"
+      );
+    } finally {
+      setProofreading(false);
     }
   };
 
@@ -716,29 +750,67 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
         </div>
 
         <div>
-          <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
             <label className="block text-xs font-medium text-slate-700">
-              题干文本（可核对订正识图错字，用于组卷打印）
+              题干文本（已按逻辑初纠，可直接核对修改后用于组卷）
             </label>
-            {croppedDataUrl && (
-              <button
-                type="button"
-                disabled={extracting}
-                onClick={() => handleExtractFromCrop(false)}
-                className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:text-blue-800 disabled:opacity-50 whitespace-nowrap shrink-0"
-              >
-                <RefreshCw className={`w-3 h-3 ${extracting ? "animate-spin" : ""}`} />
-                根据截图重新生成文本
-              </button>
-            )}
+            <div className="flex flex-wrap items-center gap-2.5">
+              {questionText.trim() && (
+                <button
+                  type="button"
+                  disabled={proofreading || extracting}
+                  onClick={handleLogicalProofread}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <Wand2 className={`w-3 h-3 ${proofreading ? "animate-pulse" : ""}`} />
+                  {proofreading ? "纠偏中..." : "按逻辑智能纠偏"}
+                </button>
+              )}
+              {rawOcrText && rawOcrText !== questionText && (
+                <button
+                  type="button"
+                  onClick={() => setQuestionText(rawOcrText)}
+                  className="text-xs text-slate-500 hover:text-slate-800 underline underline-offset-2 whitespace-nowrap shrink-0"
+                >
+                  还原原图直出
+                </button>
+              )}
+              {croppedDataUrl && (
+                <button
+                  type="button"
+                  disabled={extracting}
+                  onClick={() => handleExtractFromCrop(false)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:text-blue-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw className={`w-3 h-3 ${extracting ? "animate-spin" : ""}`} />
+                  根据截图重新生成文本
+                </button>
+              )}
+            </div>
           </div>
           <textarea
-            rows={4}
+            rows={5}
             value={questionText}
             onChange={(e) => setQuestionText(e.target.value)}
-            placeholder="点击左侧“识图提取文本”自动识别，或直接在此输入/订正题目文本"
+            placeholder="点击左侧“识图提取文本”自动识别并按逻辑纠偏，或直接在此输入/订正题目文本"
             className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 leading-relaxed"
           />
+          {(correctionNotes.length > 0 || uncertainSpots.length > 0) && (
+            <div className="mt-2 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1">
+              {correctionNotes.length > 0 && (
+                <div className="text-slate-700">
+                  <span className="font-medium text-emerald-700">逻辑自纠：</span>
+                  {correctionNotes.join("；")}
+                </div>
+              )}
+              {uncertainSpots.length > 0 && (
+                <div className="text-amber-800">
+                  <span className="font-medium">建议核对：</span>
+                  {uncertainSpots.join("；")}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -8,12 +8,14 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Wand2,
   X,
 } from "lucide-react";
 import { MasteryStatus, MistakeItem, Student, SUBJECTS, Subject } from "../types";
 import {
   buildAnswerExampleTemplate,
   extractMistakeFromImage,
+  proofreadOcrText,
 } from "../utils/ocr";
 
 interface MistakeBookProps {
@@ -482,11 +484,42 @@ export const MistakeBook: React.FC<MistakeBookProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                题干内容
-              </label>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                <label className="block text-xs font-medium text-slate-700">
+                  题干内容
+                </label>
+                {editingMistake.questionText.trim() && (
+                  <button
+                    type="button"
+                    disabled={reOcrLoading}
+                    onClick={async () => {
+                      setReOcrLoading(true);
+                      try {
+                        const res = await proofreadOcrText(
+                          editingMistake.questionText,
+                          editingMistake.subject
+                        );
+                        setEditingMistake((prev) =>
+                          prev ? { ...prev, questionText: res.correctedText } : null
+                        );
+                        setReOcrStatus(
+                          res.appliedFixes.length > 0
+                            ? `已按逻辑自动修正：${res.appliedFixes.join("；")}`
+                            : "已完成逻辑检查，暂无需要自动替换的问题。"
+                        );
+                      } finally {
+                        setReOcrLoading(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-800 disabled:opacity-50"
+                  >
+                    <Wand2 className="w-3 h-3" />
+                    按逻辑智能纠偏
+                  </button>
+                )}
+              </div>
               <textarea
-                rows={3}
+                rows={4}
                 value={editingMistake.questionText}
                 onChange={(e) =>
                   setEditingMistake({ ...editingMistake, questionText: e.target.value })
