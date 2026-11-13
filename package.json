@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node server.ts",
+    "prebuild": "node scripts/copy-ocr-assets.mjs",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist server.js public/tesseract public/tessdata",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

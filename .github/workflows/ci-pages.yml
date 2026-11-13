@@ -32,6 +32,12 @@ jobs:
       - name: TypeScript Lint Check
         run: npm run lint
 
+      - name: Bundle OCR traineddata for China/static reliability
+        run: |
+          mkdir -p public/tessdata
+          curl -fsSL "https://cdn.jsdelivr.net/npm/@tesseract.js-data/chi_sim/4.0.0_best_int/chi_sim.traineddata.gz" -o public/tessdata/chi_sim.traineddata.gz
+          curl -fsSL "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz" -o public/tessdata/eng.traineddata.gz
+
       - name: Build static bundle
         env:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
