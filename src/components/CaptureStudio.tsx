@@ -71,6 +71,7 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
   const [savedNotice, setSavedNotice] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
   // Stop camera on unmount
   useEffect(() => {
@@ -234,6 +235,10 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
 
   const startCamera = async () => {
     setCameraError("");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      cameraInputRef.current?.click();
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
@@ -248,7 +253,8 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
         }
       }, 60);
     } catch {
-      setCameraError("无法开启摄像头（浏览器未授权或当前环境无摄像头），请改用上传照片或示例试卷。");
+      cameraInputRef.current?.click();
+      setCameraError("若浏览器未开启实时取景权限，已为您调起系统相机；也可直接点击「上传试卷照片」从相册选择。");
     }
   };
 
@@ -277,6 +283,7 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    stopCamera();
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === "string") {
@@ -285,6 +292,7 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
       }
     };
     reader.readAsDataURL(file);
+    e.target.value = "";
   };
 
   const handleAIExtract = async () => {
@@ -401,6 +409,13 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
             </button>
             <input
               ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+            <input
+              ref={cameraInputRef}
               type="file"
               accept="image/*"
               capture="environment"
