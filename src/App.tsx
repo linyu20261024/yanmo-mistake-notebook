@@ -1,9 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Plus, UserPlus, X } from "lucide-react";
+import {
+  Pencil,
+  Plus,
+  Trash2,
+  Upload,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { AppState, MistakeItem, Student, Subject } from "./types";
 import {
+  clearAppState,
   loadAppState,
-  resetToPresetState,
   saveAppState,
 } from "./utils/storage";
 import { MistakeBook } from "./components/MistakeBook";
@@ -11,6 +18,11 @@ import { CaptureStudio } from "./components/CaptureStudio";
 import { ExamBuilder } from "./components/ExamBuilder";
 import { TracingStudio } from "./components/TracingStudio";
 import { StaticHostingModal } from "./components/StaticHostingModal";
+import {
+  StudentFormModal,
+  StudentImportModal,
+  StudentManageModal,
+} from "./components/StudentModals";
 
 type ActiveTab = "notebook" | "capture" | "exam" | "tracing";
 
@@ -26,15 +38,14 @@ export default function App() {
     content: string;
   } | null>(null);
 
-  const [showAddStudent, setShowAddStudent] = useState<boolean>(false);
-  const [newStudentName, setNewStudentName] = useState<string>("");
-  const [newStudentGrade, setNewStudentGrade] = useState<string>("八年级");
-  const [newStudentClass, setNewStudentClass] = useState<string>("八年级(1)班");
-  const [newStudentNote, setNewStudentNote] = useState<string>("");
+  const [showStudentForm, setShowStudentForm] = useState<boolean>(false);
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  const [showImportStudents, setShowImportStudents] = useState<boolean>(false);
+  const [showManageStudents, setShowManageStudents] = useState<boolean>(false);
+  const [confirmDeleteActive, setConfirmDeleteActive] = useState<boolean>(false);
 
   const [showHostingModal, setShowHostingModal] = useState<boolean>(false);
 
-  // Persist to localStorage on state changes
   useEffect(() => {
     const res = saveAppState(appState);
     if (!res.ok && res.error) {
@@ -44,7 +55,8 @@ export default function App() {
     }
   }, [appState]);
 
-  const activeStudent: Student = useMemo(() => {
+  const activeStudent: Student | null = useMemo(() => {
+    if (appState.students.length === 0) return null;
     return (
       appState.students.find((s) => s.id === appState.activeStudentId) ||
       appState.students[0]
@@ -52,8 +64,9 @@ export default function App() {
   }, [appState.students, appState.activeStudentId]);
 
   const studentMistakes = useMemo(() => {
+    if (!activeStudent) return [];
     return appState.mistakes.filter((m) => m.studentId === activeStudent.id);
-  }, [appState.mistakes, activeStudent.id]);
+  }, [appState.mistakes, activeStudent]);
 
   const handleSelectStudent = (studentId: string) => {
     const stu = appState.students.find((s) => s.id === studentId);
@@ -61,6 +74,7 @@ export default function App() {
       .filter((m) => m.studentId === studentId)
       .slice(0, 3)
       .map((m) => m.id);
+    setConfirmDeleteActive(false);
     setAppState((prev) => ({
       ...prev,
       activeStudentId: studentId,
@@ -73,16 +87,37 @@ export default function App() {
     setTracingDraft(null);
   };
 
-  const handleCreateStudent = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newStudentName.trim()) return;
+  const handleSaveStudentForm = (data: {
+    name: string;
+    grade: string;
+    className: string;
+    note: string;
+  }) => {
+    if (editingStudent) {
+      setAppState((prev) => ({
+        ...prev,
+        students: prev.students.map((s) =>
+          s.id === editingStudent.id ? { ...s, ...data } : s
+        ),
+        examDraft:
+          prev.activeStudentId === editingStudent.id
+            ? {
+                ...prev.examDraft,
+                title: `${data.name} · 阶段错题巩固重组训练卷`,
+              }
+            : prev.examDraft,
+      }));
+      setEditingStudent(null);
+      return;
+    }
+
     const id = `stu-${Date.now()}`;
     const newStu: Student = {
       id,
-      name: newStudentName.trim(),
-      grade: newStudentGrade.trim() || "八年级",
-      className: newStudentClass.trim() || newStudentGrade.trim(),
-      note: newStudentNote.trim(),
+      name: data.name,
+      grade: data.grade,
+      className: data.className,
+      note: data.note,
       createdAt: new Date().toISOString().slice(0, 10),
     };
     setAppState((prev) => ({
@@ -95,9 +130,75 @@ export default function App() {
         mistakeIds: [],
       },
     }));
-    setNewStudentName("");
-    setNewStudentNote("");
-    setShowAddStudent(false);
+  };
+
+  const handleBatchImportStudents = (
+    rows: { name: string; grade: string; className: string; note: string }[]
+  ) => {
+    if (rows.length === 0) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const baseTs = Date.now();
+    const created: Student[] = rows.map((r, idx) => ({
+      id: `stu-${baseTs}-${idx}`,
+      name: r.name,
+      grade: r.grade,
+      className: r.className,
+      note: r.note,
+      createdAt: today,
+    }));
+
+    setAppState((prev) => {
+      const nextStudents = [...prev.students, ...created];
+      const nextActiveId = prev.activeStudentId || created[0].id;
+      const activeStu = nextStudents.find((s) => s.id === nextActiveId);
+      return {
+        ...prev,
+        students: nextStudents,
+        activeStudentId: nextActiveId,
+        examDraft: {
+          ...prev.examDraft,
+          title: activeStu
+            ? `${activeStu.name} · 阶段错题巩固重组训练卷`
+            : prev.examDraft.title,
+        },
+      };
+    });
+  };
+
+  const handleDeleteStudent = (studentId: string) => {
+    setConfirmDeleteActive(false);
+    setAppState((prev) => {
+      const remainingStudents = prev.students.filter((s) => s.id !== studentId);
+      const removedMistakeIds = new Set(
+        prev.mistakes.filter((m) => m.studentId === studentId).map((m) => m.id)
+      );
+      const remainingMistakes = prev.mistakes.filter(
+        (m) => m.studentId !== studentId
+      );
+      const nextActiveId =
+        prev.activeStudentId === studentId
+          ? remainingStudents[0]?.id ?? ""
+          : prev.activeStudentId;
+      const nextActiveStudent = remainingStudents.find(
+        (s) => s.id === nextActiveId
+      );
+
+      return {
+        ...prev,
+        students: remainingStudents,
+        activeStudentId: nextActiveId,
+        mistakes: remainingMistakes,
+        examDraft: {
+          ...prev.examDraft,
+          title: nextActiveStudent
+            ? `${nextActiveStudent.name} · 阶段错题巩固重组训练卷`
+            : "阶段错题巩固重组训练卷",
+          mistakeIds: prev.examDraft.mistakeIds.filter(
+            (id) => !removedMistakeIds.has(id)
+          ),
+        },
+      };
+    });
   };
 
   const handleSaveNewMistake = (
@@ -170,6 +271,43 @@ export default function App() {
     }));
   };
 
+  const renderNoStudentEmptyState = () => (
+    <div className="bg-white border border-slate-200 rounded-xl p-12 text-center space-y-5 max-w-2xl mx-auto mt-6">
+      <div className="w-12 h-12 rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
+        <Users className="w-6 h-6" />
+      </div>
+      <div className="space-y-1.5">
+        <h2 className="text-lg font-semibold text-slate-900">
+          尚未添加学生档案
+        </h2>
+        <p className="text-sm text-slate-500 max-w-md mx-auto leading-relaxed">
+          请先添加或批量导入学生名单，随后即可按学生与学科拍照录题、构建错题本、重组试卷并生成浅色描红卷面。
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+        <button
+          type="button"
+          onClick={() => {
+            setEditingStudent(null);
+            setShowStudentForm(true);
+          }}
+          className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+        >
+          <UserPlus className="w-4 h-4" />
+          添加单个学生
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowImportStudents(true)}
+          className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium bg-blue-700 text-white rounded-lg hover:bg-blue-800 transition-colors cursor-pointer"
+        >
+          <Upload className="w-4 h-4" />
+          批量导入学生 (CSV / 粘贴)
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col">
       {/* Strict 3-Zone Top Navigation Bar */}
@@ -226,44 +364,123 @@ export default function App() {
         </div>
       </header>
 
-      {/* Workspace Toolbar: Student Switcher & Static Hosting Guide */}
+      {/* Workspace Toolbar: Student Switcher, Import, Edit/Delete & Backup */}
       <div className="no-print bg-white border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-slate-500 mr-1 whitespace-nowrap">
               当前学生：
             </span>
-            <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-lg">
-              {appState.students.map((stu) => {
-                const active = stu.id === activeStudent.id;
-                return (
-                  <button
-                    key={stu.id}
-                    type="button"
-                    onClick={() => handleSelectStudent(stu.id)}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      active
-                        ? "bg-white text-slate-900 shadow-xs"
-                        : "text-slate-600 hover:text-slate-900"
-                    }`}
-                  >
-                    {stu.name} · {stu.className}
-                  </button>
-                );
-              })}
+            {appState.students.length > 0 ? (
+              <>
+                <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                  {appState.students.map((stu) => {
+                    const active = stu.id === activeStudent?.id;
+                    return (
+                      <button
+                        key={stu.id}
+                        type="button"
+                        onClick={() => handleSelectStudent(stu.id)}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          active
+                            ? "bg-white text-slate-900 shadow-xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        {stu.name} · {stu.className}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Quick Edit & Delete for active student */}
+                {activeStudent && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingStudent(activeStudent);
+                        setShowStudentForm(true);
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      title="编辑当前学生"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      编辑
+                    </button>
+                    {confirmDeleteActive ? (
+                      <div className="inline-flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-2 py-1">
+                        <span className="text-xs text-red-700 whitespace-nowrap">
+                          删除 {activeStudent.name}？
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteStudent(activeStudent.id)}
+                          className="px-2 py-0.5 text-xs font-medium bg-red-600 text-white rounded hover:bg-red-700 cursor-pointer"
+                        >
+                          确认
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteActive(false)}
+                          className="text-xs text-slate-600 hover:text-slate-900 cursor-pointer"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteActive(true)}
+                        className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        title="删除当前学生"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        删除
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <span className="text-xs text-slate-400 mr-1">暂无学生</span>
+            )}
+
+            <div className="flex items-center gap-1.5 pl-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingStudent(null);
+                  setShowStudentForm(true);
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                添加学生
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowImportStudents(true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200/70 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                批量导入
+              </button>
+              {appState.students.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowManageStudents(true)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  管理 ({appState.students.length})
+                </button>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={() => setShowAddStudent(true)}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              预设新学生
-            </button>
           </div>
 
           <div className="flex items-center gap-4 text-xs">
-            {activeStudent.note && (
+            {activeStudent?.note && (
               <span className="hidden xl:inline text-slate-500 truncate max-w-xs">
                 学习目标：{activeStudent.note}
               </span>
@@ -289,29 +506,32 @@ export default function App() {
 
       {/* Main Workspace */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
-        {activeTab === "notebook" && (
-          <MistakeBook
-            activeStudent={activeStudent}
-            mistakes={studentMistakes}
-            examMistakeIds={appState.examDraft.mistakeIds}
-            onToggleExamItem={handleToggleExamItem}
-            onUpdateMistake={handleUpdateMistake}
-            onDeleteMistake={handleDeleteMistake}
-            onOpenTracing={(item) => {
-              setTracingDraft({
-                mistakeId: item.id,
-                subject: item.subject,
-                title: `${item.knowledgePoint} · 规范书写`,
-                content:
-                  item.handwritingTemplate ||
-                  item.correctionSteps ||
-                  item.standardAnswer,
-              });
-              setActiveTab("tracing");
-            }}
-            onGoToCapture={() => setActiveTab("capture")}
-          />
-        )}
+        {activeTab === "notebook" &&
+          (activeStudent ? (
+            <MistakeBook
+              activeStudent={activeStudent}
+              mistakes={studentMistakes}
+              examMistakeIds={appState.examDraft.mistakeIds}
+              onToggleExamItem={handleToggleExamItem}
+              onUpdateMistake={handleUpdateMistake}
+              onDeleteMistake={handleDeleteMistake}
+              onOpenTracing={(item) => {
+                setTracingDraft({
+                  mistakeId: item.id,
+                  subject: item.subject,
+                  title: `${item.knowledgePoint} · 规范书写`,
+                  content:
+                    item.handwritingTemplate ||
+                    item.correctionSteps ||
+                    item.standardAnswer,
+                });
+                setActiveTab("tracing");
+              }}
+              onGoToCapture={() => setActiveTab("capture")}
+            />
+          ) : (
+            renderNoStudentEmptyState()
+          ))}
 
         {activeTab === "capture" && (
           <CaptureStudio
@@ -323,22 +543,29 @@ export default function App() {
               setTracingDraft(draft);
               setActiveTab("tracing");
             }}
+            onRequireStudent={() => {
+              setEditingStudent(null);
+              setShowStudentForm(true);
+            }}
           />
         )}
 
-        {activeTab === "exam" && (
-          <ExamBuilder
-            activeStudent={activeStudent}
-            mistakes={studentMistakes}
-            draft={appState.examDraft}
-            onUpdateDraft={(patch) =>
-              setAppState((prev) => ({
-                ...prev,
-                examDraft: { ...prev.examDraft, ...patch },
-              }))
-            }
-          />
-        )}
+        {activeTab === "exam" &&
+          (activeStudent ? (
+            <ExamBuilder
+              activeStudent={activeStudent}
+              mistakes={studentMistakes}
+              draft={appState.examDraft}
+              onUpdateDraft={(patch) =>
+                setAppState((prev) => ({
+                  ...prev,
+                  examDraft: { ...prev.examDraft, ...patch },
+                }))
+              }
+            />
+          ) : (
+            renderNoStudentEmptyState()
+          ))}
 
         {activeTab === "tracing" && (
           <TracingStudio
@@ -350,94 +577,44 @@ export default function App() {
         )}
       </main>
 
-      {/* Add Student Modal */}
-      {showAddStudent && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-[1px] flex items-center justify-center p-4">
-          <form
-            onSubmit={handleCreateStudent}
-            className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-6 space-y-4"
-          >
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <h3 className="text-base font-semibold text-slate-900">
-                添加预设学生档案
-              </h3>
-              <button
-                type="button"
-                onClick={() => setShowAddStudent(false)}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                学生姓名
-              </label>
-              <input
-                type="text"
-                required
-                value={newStudentName}
-                onChange={(e) => setNewStudentName(e.target.value)}
-                placeholder="例如：周予安"
-                className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  年级阶段
-                </label>
-                <input
-                  type="text"
-                  value={newStudentGrade}
-                  onChange={(e) => setNewStudentGrade(e.target.value)}
-                  placeholder="例如：九年级"
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  所在班级
-                </label>
-                <input
-                  type="text"
-                  value={newStudentClass}
-                  onChange={(e) => setNewStudentClass(e.target.value)}
-                  placeholder="例如：九年级(4)班"
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                薄弱项 / 书写训练备注
-              </label>
-              <input
-                type="text"
-                value={newStudentNote}
-                onChange={(e) => setNewStudentNote(e.target.value)}
-                placeholder="例如：加强化学方程式配平与卷面整洁度"
-                className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
-              />
-            </div>
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
-              <button
-                type="button"
-                onClick={() => setShowAddStudent(false)}
-                className="px-4 py-2 text-xs font-medium text-slate-600 hover:text-slate-900"
-              >
-                取消
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 text-xs font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800"
-              >
-                确认添加并切换
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+      {/* Add / Edit Single Student Modal */}
+      <StudentFormModal
+        isOpen={showStudentForm}
+        editingStudent={editingStudent}
+        onClose={() => {
+          setShowStudentForm(false);
+          setEditingStudent(null);
+        }}
+        onSave={handleSaveStudentForm}
+      />
+
+      {/* Batch Import Students Modal */}
+      <StudentImportModal
+        isOpen={showImportStudents}
+        onClose={() => setShowImportStudents(false)}
+        onImport={handleBatchImportStudents}
+      />
+
+      {/* Manage All Students Modal */}
+      <StudentManageModal
+        isOpen={showManageStudents}
+        students={appState.students}
+        activeStudentId={activeStudent?.id || ""}
+        mistakes={appState.mistakes}
+        onClose={() => setShowManageStudents(false)}
+        onSelectStudent={handleSelectStudent}
+        onEditStudent={(stu) => {
+          setShowManageStudents(false);
+          setEditingStudent(stu);
+          setShowStudentForm(true);
+        }}
+        onDeleteStudent={handleDeleteStudent}
+        onOpenAdd={() => {
+          setEditingStudent(null);
+          setShowStudentForm(true);
+        }}
+        onOpenImport={() => setShowImportStudents(true)}
+      />
 
       {/* Static Web Hosting & Backup Modal */}
       <StaticHostingModal
@@ -445,7 +622,7 @@ export default function App() {
         onClose={() => setShowHostingModal(false)}
         appState={appState}
         onImportState={(nextState) => setAppState(nextState)}
-        onResetPresets={() => setAppState(resetToPresetState())}
+        onClearAllData={() => setAppState(clearAppState())}
       />
     </div>
   );

@@ -22,7 +22,7 @@ import {
 } from "../types";
 
 interface TracingStudioProps {
-  activeStudent: Student;
+  activeStudent: Student | null;
   mistakes: MistakeItem[];
   initialDraft?: {
     mistakeId?: string;
@@ -413,8 +413,8 @@ export const TracingStudio: React.FC<TracingStudioProps> = ({
               </h3>
             </div>
             <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600 tabular-nums">
-              <span>学生：{activeStudent.name}</span>
-              <span>班级：{activeStudent.className}</span>
+              <span>学生：{activeStudent?.name || "________"}</span>
+              <span>班级：{activeStudent?.className || "________"}</span>
               <span>学科：{config.subject}</span>
               <span>日期：____年__月__日</span>
             </div>
@@ -688,7 +688,9 @@ export const TracingStudio: React.FC<TracingStudioProps> = ({
         {/* Mistake Selector */}
         <div>
           <label className="block text-xs font-medium text-slate-700 mb-1.5">
-            从 {activeStudent.name} 的错题本载入规范范例
+            {activeStudent
+              ? `从 ${activeStudent.name} 的错题本载入规范范例`
+              : "从错题本载入规范范例"}
           </label>
           <select
             value={selectedMistakeId}

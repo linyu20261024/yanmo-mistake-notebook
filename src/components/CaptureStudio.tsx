@@ -14,13 +14,14 @@ import { MistakeItem, Student, SUBJECTS, Subject } from "../types";
 import { SAMPLE_ENGLISH_PAPER_URL, SAMPLE_MATH_PAPER_URL } from "../data/presets";
 
 interface CaptureStudioProps {
-  activeStudent: Student;
+  activeStudent: Student | null;
   onSaveMistake: (mistake: Omit<MistakeItem, "id" | "createdAt" | "updatedAt">) => void;
   onGoToTracing: (mistakeDraft: {
     subject: Subject;
     title: string;
     content: string;
   }) => void;
+  onRequireStudent: () => void;
 }
 
 interface CropRect {
@@ -34,8 +35,9 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
   activeStudent,
   onSaveMistake,
   onGoToTracing,
+  onRequireStudent,
 }) => {
-  const [sourceUrl, setSourceUrl] = useState<string>(SAMPLE_MATH_PAPER_URL);
+  const [sourceUrl, setSourceUrl] = useState<string>("");
   const [rotation, setRotation] = useState<number>(0);
   const [enhancePaper, setEnhancePaper] = useState<boolean>(false);
   const [removeRedMarks, setRemoveRedMarks] = useState<boolean>(false);
@@ -300,7 +302,7 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
           imageBase64: croppedDataUrl,
           mimeType: "image/jpeg",
           preferredSubject,
-          studentGrade: activeStudent.grade,
+          studentGrade: activeStudent?.grade || "",
         }),
       });
       const data = await resp.json();
@@ -334,6 +336,11 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!activeStudent) {
+      setExtractError("请先添加或导入至少一名学生，再保存错题。");
+      onRequireStudent();
+      return;
+    }
     if (!questionText.trim()) {
       setExtractError("请填写或识别错题题干内容后再保存。");
       return;
@@ -466,6 +473,16 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
               </button>
             </div>
           </div>
+        ) : !sourceUrl ? (
+          <div className="border-2 border-dashed border-slate-200 rounded-lg bg-slate-50/70 py-14 px-6 text-center space-y-3">
+            <ImagePlus className="w-8 h-8 text-slate-300 mx-auto" />
+            <div className="text-sm font-medium text-slate-700">
+              尚未加载试卷照片
+            </div>
+            <p className="text-xs text-slate-500 max-w-sm mx-auto">
+              请点击上方「现场拍照」或「上传试卷照片」导入错题图片，也可直接在右侧手工输入题干归档。
+            </p>
+          </div>
         ) : (
           <div className="space-y-3">
             <div className="relative bg-slate-100 border border-slate-200 rounded-lg overflow-hidden">
@@ -588,7 +605,17 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
               02. 确认错题归档与规范卷面范例
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              当前归档学生：<span className="font-medium text-slate-800">{activeStudent.name}</span>（{activeStudent.className}）
+              {activeStudent ? (
+                <>
+                  当前归档学生：
+                  <span className="font-medium text-slate-800">{activeStudent.name}</span>
+                  （{activeStudent.className}）
+                </>
+              ) : (
+                <span className="text-amber-700">
+                  尚未选择学生，请先点击顶部「添加学生」或「批量导入」
+                </span>
+              )}
             </p>
           </div>
           {savedNotice && (
@@ -747,7 +774,9 @@ export const CaptureStudio: React.FC<CaptureStudioProps> = ({
             className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
           >
             <ImagePlus className="w-4 h-4" />
-            保存到 {activeStudent.name} 的{subject}错题集
+            {activeStudent
+              ? `保存到 ${activeStudent.name} 的${subject}错题集`
+              : "先添加学生后保存"}
           </button>
         </div>
       </form>

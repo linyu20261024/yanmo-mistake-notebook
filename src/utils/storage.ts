@@ -1,7 +1,7 @@
 import { AppState } from "../types";
 import { INITIAL_APP_STATE } from "../data/presets";
 
-const STORAGE_KEY = "yanmo_mistake_notebook_v1";
+const STORAGE_KEY = "yanmo_mistake_notebook_v2";
 
 export function loadAppState(): AppState {
   try {
@@ -10,15 +10,15 @@ export function loadAppState(): AppState {
       return INITIAL_APP_STATE;
     }
     const parsed = JSON.parse(raw) as Partial<AppState>;
-    if (!parsed.students || !Array.isArray(parsed.students) || parsed.students.length === 0) {
-      return INITIAL_APP_STATE;
-    }
+    const students = Array.isArray(parsed.students) ? parsed.students : [];
+    const activeStudentId =
+      parsed.activeStudentId && students.some((s) => s.id === parsed.activeStudentId)
+        ? parsed.activeStudentId
+        : students[0]?.id ?? "";
+
     return {
-      students: parsed.students,
-      activeStudentId:
-        parsed.activeStudentId && parsed.students.some((s) => s.id === parsed.activeStudentId)
-          ? parsed.activeStudentId
-          : parsed.students[0].id,
+      students,
+      activeStudentId,
       mistakes: Array.isArray(parsed.mistakes) ? parsed.mistakes : [],
       examDraft: parsed.examDraft ?? INITIAL_APP_STATE.examDraft,
     };
@@ -44,7 +44,7 @@ export function saveAppState(state: AppState): { ok: boolean; error?: string } {
 
 export function exportBackupJSON(state: AppState): void {
   const payload = {
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     data: state,
   };
@@ -59,7 +59,7 @@ export function exportBackupJSON(state: AppState): void {
   URL.revokeObjectURL(url);
 }
 
-export function resetToPresetState(): AppState {
+export function clearAppState(): AppState {
   localStorage.removeItem(STORAGE_KEY);
   return INITIAL_APP_STATE;
 }

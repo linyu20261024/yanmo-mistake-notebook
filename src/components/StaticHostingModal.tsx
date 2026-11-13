@@ -8,7 +8,7 @@ interface StaticHostingModalProps {
   onClose: () => void;
   appState: AppState;
   onImportState: (state: AppState) => void;
-  onResetPresets: () => void;
+  onClearAllData: () => void;
 }
 
 export const StaticHostingModal: React.FC<StaticHostingModalProps> = ({
@@ -16,10 +16,11 @@ export const StaticHostingModal: React.FC<StaticHostingModalProps> = ({
   onClose,
   appState,
   onImportState,
-  onResetPresets,
+  onClearAllData,
 }) => {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [importStatus, setImportStatus] = useState<string>("");
+  const [confirmClear, setConfirmClear] = useState<boolean>(false);
 
   if (!isOpen) return null;
 
@@ -142,17 +143,38 @@ export const StaticHostingModal: React.FC<StaticHostingModalProps> = ({
               onChange={handleImportFile}
               className="hidden"
             />
-            <button
-              type="button"
-              onClick={() => {
-                onResetPresets();
-                setImportStatus("已重置为初始预设学生与示例错题。");
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 hover:text-red-600 ml-auto"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              恢复预设示例数据
-            </button>
+            {confirmClear ? (
+              <div className="inline-flex items-center gap-2 ml-auto bg-red-50 border border-red-200 rounded-lg px-2.5 py-1">
+                <span className="text-xs text-red-700">确认清空全部本地数据？</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClearAllData();
+                    setConfirmClear(false);
+                    setImportStatus("已清空本地存储的所有学生与错题数据。");
+                  }}
+                  className="px-2 py-0.5 text-xs font-medium bg-red-600 text-white rounded hover:bg-red-700"
+                >
+                  确认清空
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmClear(false)}
+                  className="text-xs text-slate-600 hover:text-slate-900"
+                >
+                  取消
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmClear(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 hover:text-red-600 ml-auto"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                清空本地数据
+              </button>
+            )}
           </div>
           {importStatus && <p className="text-xs text-blue-700">{importStatus}</p>}
         </div>
