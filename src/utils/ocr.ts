@@ -28,6 +28,7 @@ function getBaseHref(): string {
 async function resolveWorkerAndCorePaths(): Promise<{
   workerPath: string;
   corePath: string;
+  isSameOrigin: boolean;
 }> {
   const baseHref = getBaseHref();
   const localWorker = `${baseHref}tesseract/worker.min.js`;
@@ -40,10 +41,11 @@ async function resolveWorkerAndCorePaths(): Promise<{
     });
     clearTimeout(timer);
     const ct = resp.headers.get("content-type") || "";
-    if (resp.ok && (ct.includes("javascript") || ct.includes("ecmascript"))) {
+    if (resp.ok && !ct.includes("text/html")) {
       return {
         workerPath: localWorker,
         corePath: `${baseHref}tesseract`,
+        isSameOrigin: true,
       };
     }
   } catch {
@@ -54,11 +56,51 @@ async function resolveWorkerAndCorePaths(): Promise<{
       "https://cdn.npmmirror.com/packages/tesseract.js/7.0.0/files/dist/worker.min.js",
     corePath:
       "https://cdn.npmmirror.com/packages/tesseract.js-core/7.0.0/files",
+    isSameOrigin: false,
   };
 }
 
 function isValidGzipHeader(buf: Uint8Array): boolean {
   return buf.length > 64 && buf[0] === 0x1f && buf[1] === 0x8b;
+}
+
+async function writeTesseractIdbCache(key: string, value: Uint8Array): Promise<boolean> {
+  if (typeof indexedDB === "undefined") return false;
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open("keyval-store");
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains("keyval")) {
+          req.result.createObjectStore("keyval");
+        }
+      };
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          if (!db.objectStoreNames.contains("keyval")) {
+            db.close();
+            resolve(false);
+            return;
+          }
+          const tx = db.transaction("keyval", "readwrite");
+          tx.objectStore("keyval").put(value, key);
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            resolve(false);
+          };
+        } catch {
+          resolve(false);
+        }
+      };
+      req.onerror = () => resolve(false);
+    } catch {
+      resolve(false);
+    }
+  });
 }
 
 async function fetchWithProgressAndTimeout(
@@ -126,7 +168,7 @@ async function loadLangBinary(
   lang: "chi_sim" | "eng",
   displayLabel: string,
   onProgress?: (msg: string) => void
-): Promise<{ code: string; data: Uint8Array }> {
+): Promise<Uint8Array> {
   const cacheKey = `https://yanmo.local/tessdata/4.0.0_best_int/${lang}.traineddata.gz`;
 
   // 1. Check CacheStorage first
@@ -138,7 +180,7 @@ async function loadLangBinary(
         const bytes = new Uint8Array(await cached.arrayBuffer());
         if (isValidGzipHeader(bytes)) {
           onProgress?.(`已从本地缓存读取${displayLabel}`);
-          return { code: lang, data: bytes };
+          return bytes;
         }
       }
     } catch {
@@ -188,7 +230,7 @@ async function loadLangBinary(
           // Ignore cache write errors
         }
       }
-      return { code: lang, data: bytes };
+      return bytes;
     }
   }
 
@@ -325,32 +367,70 @@ async function runBrowserOcr(
   onProgress?: (label: string) => void
 ): Promise<string> {
   onProgress?.("正在准备识图核心引擎...");
-  const { workerPath, corePath } = await resolveWorkerAndCorePaths();
+  const { workerPath, corePath, isSameOrigin } = await resolveWorkerAndCorePaths();
+  const baseHref = getBaseHref();
 
-  const chiData = await loadLangBinary("chi_sim", "中文识图模型", onProgress);
-  const engData = await loadLangBinary("eng", "英文数字模型", onProgress);
+  const chiBytes = await loadLangBinary("chi_sim", "中文识图模型", onProgress);
+  const engBytes = await loadLangBinary("eng", "英文数字模型", onProgress);
+
+  // Store downloaded gzipped traineddata into tesseract's IndexedDB cache ("keyval-store")
+  // so we can pass string "chi_sim+eng" to createWorker and bypass tesseract.js v7's {code, data} init bug
+  const chiCached = await writeTesseractIdbCache("./chi_sim.traineddata", chiBytes);
+  const engCached = await writeTesseractIdbCache("./eng.traineddata", engBytes);
 
   onProgress?.("正在启动本地识图引擎...");
-  const worker = await createWorker([chiData, engData], 1, {
+
+  let rejectWorkerError: ((err: Error) => void) | null = null;
+  const workerErrorPromise = new Promise<never>((_, reject) => {
+    rejectWorkerError = reject;
+  });
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(new Error("本地识图引擎启动超时，请刷新页面后重试或直接手工输入题干。"));
+    }, 25000);
+  });
+
+  const createPromise = createWorker("chi_sim+eng", 1, {
     workerPath,
     corePath,
-    cacheMethod: "none",
+    workerBlobURL: !isSameOrigin,
+    langPath: `${baseHref}tessdata`,
+    cacheMethod: chiCached && engCached ? "readOnly" : "write",
+    errorHandler: (err) => {
+      rejectWorkerError?.(new Error(typeof err === "string" ? err : "识图引擎加载失败"));
+    },
     logger: (m) => {
-      if (m.status === "recognizing text") {
+      if (m.status === "loading tesseract core") {
+        onProgress?.("正在加载识图 WASM 核心...");
+      } else if (m.status === "loading language traineddata") {
+        const pct = Math.round((m.progress || 0) * 100);
+        onProgress?.(`正在解压语言模型 ${pct}%...`);
+      } else if (m.status === "initializing api" || m.status === "initializing tesseract") {
+        onProgress?.("正在初始化文字识别引擎...");
+      } else if (m.status === "recognizing text") {
         const pct = Math.round((m.progress || 0) * 100);
         onProgress?.(`正在识别题目文字 ${pct}%...`);
       }
     },
   });
 
+  const worker = await Promise.race([createPromise, workerErrorPromise, timeoutPromise]);
+
   try {
+    onProgress?.("正在优化图片并识别文字...");
     const processedImg = await preprocessForOcr(imageBase64);
     const {
       data: { text },
-    } = await worker.recognize(processedImg);
+    } = await Promise.race([
+      worker.recognize(processedImg),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("文字识别超时，请适当缩小框选范围后重试。")), 25000)
+      ),
+    ]);
     return cleanOcrText(text || "");
   } finally {
-    await worker.terminate();
+    await worker.terminate().catch(() => {});
   }
 }
 
